@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tarayıcıda Ön Eleme (WebAssembly)</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 760px; margin: 2rem auto; padding: 0 1rem; color: #1f2937; }
+  h1 { font-size: 1.4rem; color: #0b6b3a; }
+  table { border-collapse: collapse; margin-top: 1rem; width: 100%; }
+  td, th { border: 1px solid #d1d5db; padding: .5rem .75rem; text-align: left; }
+  video { width: 100%; max-height: 300px; background: #000; margin-top: 1rem; }
+  progress { width: 100%; }
+  #status { margin: 1rem 0 .25rem; }
+</style>
+</head>
+<body>
+<h1>Tarayıcıda Ön Eleme — OpenCV.js (WebAssembly)</h1>
+<p>Video sunucuya gitmeden önce tarayıcıda taranır; yalnızca değişim olan kritik kareler
+   küçültülüp (480p JPEG) sunucuya gönderilmek üzere seçilir. Hiçbir veri yüklenmez, sayım yereldir.</p>
+
+<input type="file" id="file" accept="video/*" disabled>
+<label> Eşik <input type="number" id="threshold" value="5" step="0.5" style="width:4rem"></label>
+<div id="status">OpenCV.js (WebAssembly) yükleniyor…</div>
+<progress id="bar" value="0" max="1"></progress>
+<video id="video" muted playsinline></video>
+
+<table>
+  <tr><th>Taranan kare</th><td id="total">0</td></tr>
+  <tr><th>Sunucuya gönderilecek kare</th><td id="sent">0</td></tr>
+  <tr><th>Elenen kare oranı</th><td id="skipped">-</td></tr>
+  <tr><th>Ham video boyutu</th><td id="rawSize">-</td></tr>
+  <tr><th>Gönderilecek veri (seçilen kareler)</th><td id="sentSize">-</td></tr>
+</table>
+
+<script>
+const FPS = 30, MAX_GAP = FPS;            // optimized.py ile ayni mantik
+const TW = 160, TH = 90, SEND_HEIGHT = 480;
+const $ = id => document.getElementById(id);
+const mb = b => (b / 1048576).toFixed(2) + " MB";
+
+var Module = { onRuntimeInitialized() { ready(); } };
+function ready() { $("status").textContent = "Hazır. Bir mülakat videosu seçin."; $("file").disabled = false; }
+
+const video = $("video");
+const thumbCanvas = Object.assign(document.createElement("canvas"), { width: TW, height: TH });
+const thumbCtx = thumbCanvas.getContext("2d", { willReadFrequently: true });
+const sendCanvas = document.createElement("canvas");
+
+const seek = t => new Promise(r => { video.onseeked = r; video.currentTime = t; });
+const jpegSize = () => new Promise(r => sendCanvas.toBlob(b => r(b ? b.size : 0), "image/jpeg", 0.8));
+
+$("file").onchange = async e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  $("file").disabled = true;
+  video.src = URL.createObjectURL(file);
+  await new Promise(r => video.onloadedmetadata = r);
+
+  const scale = Math.min(1, SEND_HEIGHT / video.videoHeight);
+  sendCanvas.width = Math.round(video.videoWidth * scale);
+  sendCanvas.height = Math.round(video.videoHeight * scale);
+  const sendCtx = sendCanvas.getContext("2d");
+  const threshold = parseFloat($("threshold").value);
+
+  let last = null, since = 0, total = 0, sent = 0, bytes = 0;
+  const diff = new cv.Mat();
+  $("rawSize").textContent = mb(file.size);
+
+  for (let t = 0; t < video.duration; t += 1 / FPS) {
+    await seek(t);
+    thumbCtx.drawImage(video, 0, 0, TW, TH);
+    const rgba = cv.imread(thumbCanvas);
+    const gray = new cv.Mat();
+    cv.cvtColor(rgba, gray, cv.COLOR_RGBA2GRAY);
+    rgba.delete();
+
+    let changed = last === null || since >= MAX_GAP;
+    if (!changed) {
+      cv.absdiff(gray, last, diff);
+      changed = cv.mean(diff)[0] > threshold;
+    }
+    if (changed) {                       // kritik kare: kucult ve gonderilecekler arasina al
+      sendCtx.drawImage(video, 0, 0, sendCanvas.width, sendCanvas.height);
+      bytes += await jpegSize();
+      if (last) last.delete();
+      last = gray; since = 0; sent++;
+    } else {                             // benzer kare: sunucuya gitmez
+      gray.delete(); since++;
+    }
+    total++;
+
+    $("total").textContent = total;
+    $("sent").textContent = sent;
+    $("skipped").textContent = "%" + (100 * (total - sent) / total).toFixed(1);
+    $("sentSize").textContent = mb(bytes);
+    $("bar").value = t / video.duration;
+    $("status").textContent = "Taranıyor…";
+  }
+  if (last) last.delete();
+  diff.delete();
+  $("bar").value = 1;
+  $("status").textContent = "Bitti.";
+  $("file").disabled = false;
+};
+</script>
+<script async src="https://docs.opencv.org/4.x/opencv.js"></script>
+</body>
+</html>
